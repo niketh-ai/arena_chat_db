@@ -222,14 +222,14 @@ io.on('connection', (socket) => {
     console.log(`👤 User ${userId} joined room`);
   });
 
-  // Handle sending messages
+  // Handle sending messages - FIXED VERSION
   socket.on('send_message', async (data) => {
     try {
       const { senderId, receiverId, messageText } = data;
       
       console.log('💬 Message received:', { senderId, receiverId, messageText });
 
-      // Save message to database
+      // Save message to database - CORRECT sender/receiver
       const result = await pool.query(
         'INSERT INTO messages (sender_id, receiver_id, message_text) VALUES ($1, $2, $3) RETURNING id, created_at',
         [senderId, receiverId, messageText]
@@ -252,13 +252,15 @@ io.on('connection', (socket) => {
         timestamp: savedMessage.created_at
       };
 
+      console.log('📨 SAVED MESSAGE:', messageData);
+
       // Send to receiver
       socket.to(receiverId.toString()).emit('new_message', messageData);
       
       // Also send back to sender (for confirmation)
-      socket.emit('message_sent', messageData);
+      socket.emit('new_message', messageData);
       
-      console.log('✅ Message delivered to room:', receiverId.toString());
+      console.log('✅ Message delivered to both users');
 
     } catch (error) {
       console.error('❌ Message send error:', error);
