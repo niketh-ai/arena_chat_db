@@ -254,11 +254,11 @@ io.on('connection', (socket) => {
 
       console.log('📨 SAVED MESSAGE:', messageData);
 
-      // Send to receiver
-      socket.to(receiverId.toString()).emit('new_message', messageData);
+      // FIXED: Send to receiver using their room
+      io.to(receiverId.toString()).emit('new_message', messageData);
       
-      // Also send back to sender (for confirmation)
-      socket.emit('new_message', messageData);
+      // FIXED: Also send back to sender using their room (not current socket)
+      io.to(senderId.toString()).emit('new_message', messageData);
       
       console.log('✅ Message delivered to both users');
 
