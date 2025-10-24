@@ -19,10 +19,21 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL connection
+// PostgreSQL connection - DIRECT CONFIG (no database.js needed)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+// Test database connection
+pool.on('connect', () => {
+  console.log('✅ Connected to PostgreSQL database');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Database connection error:', err);
 });
 
 // Initialize database tables
@@ -39,12 +50,12 @@ async function initializeDatabase() {
       )
     `);
 
-    // Messages table
+    // Messages table - FIXED WITH PROPER COLUMNS
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
-        sender_id INTEGER REFERENCES users(id),
-        receiver_id INTEGER REFERENCES users(id),
+        sender_id INTEGER NOT NULL REFERENCES users(id),
+        receiver_id INTEGER NOT NULL REFERENCES users(id),
         message_text TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -184,27 +195,33 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// Get messages between two users
+// Get messages between two users - FIXED QUERY
 app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
   try {
     const { user1Id, user2Id } = req.params;
     
+    console.log(`📨 Loading messages between ${user1Id} and ${user2Id}`);
+    
     const result = await pool.query(
-      `SELECT m.*, u.name as sender_name 
+      `SELECT m.id, m.sender_id as "senderId", m.receiver_id as "receiverId", 
+              m.message_text as "messageText", u.name as "senderName", 
+              m.created_at as timestamp
        FROM messages m 
        JOIN users u ON m.sender_id = u.id 
-       WHERE (sender_id = $1 AND receiver_id = $2) 
-          OR (sender_id = $2 AND receiver_id = $1) 
+       WHERE (m.sender_id = $1 AND m.receiver_id = $2) 
+          OR (m.sender_id = $2 AND m.receiver_id = $1) 
        ORDER BY m.created_at ASC`,
       [user1Id, user2Id]
     );
+    
+    console.log(`✅ Found ${result.rows.length} messages in database`);
     
     res.json({ 
       success: true,
       messages: result.rows 
     });
   } catch (error) {
-    console.error('Get messages error:', error);
+    console.error('❌ Get messages error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch messages' 
@@ -212,7 +229,7 @@ app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
   }
 });
 
-// ========== REAL-TIME MESSAGING ==========
+// ========== REAL-TIME MESSAGING - FIXED VERSION ==========
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
@@ -222,20 +239,30 @@ io.on('connection', (socket) => {
     console.log(`👤 User ${userId} joined room`);
   });
 
-  // Handle sending messages - FIXED VERSION
+  // Handle sending messages - COMPLETELY FIXED VERSION
   socket.on('send_message', async (data) => {
     try {
       const { senderId, receiverId, messageText } = data;
       
-      console.log('💬 Message received:', { senderId, receiverId, messageText });
+      console.log('💬 Message received for saving:', { senderId, receiverId, messageText });
 
-      // Save message to database - CORRECT sender/receiver
+      // Validate data
+      if (!senderId || !receiverId || !messageText) {
+        console.error('❌ Missing required fields');
+        socket.emit('message_error', { error: 'Missing required fields' });
+        return;
+      }
+
+      console.log('💾 Attempting to save message to database...');
+      
+      // Save message to database - WITH PROPER ERROR HANDLING
       const result = await pool.query(
         'INSERT INTO messages (sender_id, receiver_id, message_text) VALUES ($1, $2, $3) RETURNING id, created_at',
         [senderId, receiverId, messageText]
       );
 
       const savedMessage = result.rows[0];
+      console.log('✅ Message saved to database with ID:', savedMessage.id);
       
       // Get sender name
       const userResult = await pool.query(
@@ -243,28 +270,30 @@ io.on('connection', (socket) => {
         [senderId]
       );
       
+      const senderName = userResult.rows[0]?.name || 'Unknown';
+      
       const messageData = {
         id: savedMessage.id,
         senderId: parseInt(senderId),
         receiverId: parseInt(receiverId),
         messageText: messageText,
-        senderName: userResult.rows[0]?.name || 'Unknown',
+        senderName: senderName,
         timestamp: savedMessage.created_at
       };
 
-      console.log('📨 SAVED MESSAGE:', messageData);
+      console.log('📨 Broadcasting message:', messageData);
 
-      // FIXED: Send to receiver using their room
+      // Send to receiver
       io.to(receiverId.toString()).emit('new_message', messageData);
       
-      // FIXED: Also send back to sender using their room (not current socket)
+      // Also send back to sender (for confirmation)
       io.to(senderId.toString()).emit('new_message', messageData);
       
       console.log('✅ Message delivered to both users');
 
     } catch (error) {
-      console.error('❌ Message send error:', error);
-      socket.emit('message_error', { error: 'Failed to send message' });
+      console.error('❌ Message save error:', error);
+      socket.emit('message_error', { error: 'Failed to save message to database' });
     }
   });
 
