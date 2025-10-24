@@ -343,7 +343,7 @@ app.delete('/api/messages/delete-for-everyone', async (req, res) => {
   }
 });
 
-// ========== REAL-TIME MESSAGING - FIXED VERSION ==========
+// ========== REAL-TIME MESSAGING WITH NOTIFICATIONS ==========
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
@@ -353,7 +353,7 @@ io.on('connection', (socket) => {
     console.log(`👤 User ${userId} joined room`);
   });
 
-  // Handle sending messages - COMPLETELY FIXED VERSION
+  // Handle sending messages - UPDATED WITH NOTIFICATIONS
   socket.on('send_message', async (data) => {
     try {
       const { senderId, receiverId, messageText } = data;
@@ -403,7 +403,19 @@ io.on('connection', (socket) => {
       // Also send back to sender (for confirmation)
       io.to(senderId.toString()).emit('new_message', messageData);
       
-      console.log('✅ Message delivered to both users');
+      // Send notification to receiver
+      const notificationData = {
+        senderId: parseInt(senderId),
+        senderName: senderName,
+        messageText: messageText,
+        messageId: savedMessage.id,
+        timestamp: savedMessage.created_at
+      };
+      
+      io.to(receiverId.toString()).emit('new_notification', notificationData);
+      console.log('🔔 Notification sent to user:', receiverId);
+      
+      console.log('✅ Message delivered to both users with notification');
 
     } catch (error) {
       console.error('❌ Message save error:', error);
@@ -445,6 +457,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle notification read events
+  socket.on('mark_notification_read', (data) => {
+    try {
+      const { userId, senderId } = data;
+      console.log(`📱 User ${userId} marked notifications from ${senderId} as read`);
+      // You can implement server-side notification tracking here if needed
+    } catch (error) {
+      console.error('❌ Notification read error:', error);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('🔌 User disconnected:', socket.id);
   });
@@ -457,6 +480,7 @@ initializeDatabase().then(() => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📧 API available at http://localhost:${PORT}/api`);
     console.log(`🔌 WebSocket available at http://localhost:${PORT}`);
+    console.log('🔔 Notification system: ACTIVE');
   });
 }).catch(error => {
   console.error('❌ Failed to start server:', error);
