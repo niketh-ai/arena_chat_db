@@ -61,6 +61,17 @@ async function initializeDatabase() {
       )
     `);
 
+    // Create deleted_messages table for "delete for me" functionality
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS deleted_messages (
+        id SERIAL PRIMARY KEY,
+        message_id INTEGER NOT NULL REFERENCES messages(id),
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(message_id, user_id)
+      )
+    `);
+
     console.log('✅ Database tables created successfully');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
@@ -195,7 +206,7 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// Get messages between two users - FIXED QUERY
+// Get messages between two users - UPDATED to exclude deleted messages
 app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
   try {
     const { user1Id, user2Id } = req.params;
@@ -208,8 +219,11 @@ app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
               m.created_at as timestamp
        FROM messages m 
        JOIN users u ON m.sender_id = u.id 
-       WHERE (m.sender_id = $1 AND m.receiver_id = $2) 
-          OR (m.sender_id = $2 AND m.receiver_id = $1) 
+       WHERE ((m.sender_id = $1 AND m.receiver_id = $2) 
+          OR (m.sender_id = $2 AND m.receiver_id = $1))
+         AND m.id NOT IN (
+           SELECT message_id FROM deleted_messages WHERE user_id = $1
+         )
        ORDER BY m.created_at ASC`,
       [user1Id, user2Id]
     );
@@ -225,6 +239,106 @@ app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch messages' 
+    });
+  }
+});
+
+// Delete message for me only
+app.delete('/api/messages/delete-for-me', async (req, res) => {
+  try {
+    const { messageId, userId } = req.body;
+    
+    console.log(`🗑️ Delete for me: Message ${messageId} by User ${userId}`);
+    
+    // Check if message exists and user has permission to delete it
+    const messageCheck = await pool.query(
+      'SELECT * FROM messages WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)',
+      [messageId, userId]
+    );
+    
+    if (messageCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Message not found or no permission to delete'
+      });
+    }
+    
+    // Mark message as deleted for this user
+    await pool.query(
+      'INSERT INTO deleted_messages (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [messageId, userId]
+    );
+    
+    console.log(`✅ Message ${messageId} deleted for user ${userId}`);
+    
+    res.json({
+      success: true,
+      message: 'Message deleted for you'
+    });
+    
+  } catch (error) {
+    console.error('❌ Delete for me error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete message'
+    });
+  }
+});
+
+// Delete message for everyone
+app.delete('/api/messages/delete-for-everyone', async (req, res) => {
+  try {
+    const { messageId, userId } = req.body;
+    
+    console.log(`🗑️ Delete for everyone: Message ${messageId} by User ${userId}`);
+    
+    // Check if user is the sender of the message
+    const messageCheck = await pool.query(
+      'SELECT * FROM messages WHERE id = $1 AND sender_id = $2',
+      [messageId, userId]
+    );
+    
+    if (messageCheck.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only message sender can delete for everyone'
+      });
+    }
+    
+    // Get message details for socket notification
+    const messageDetails = await pool.query(
+      `SELECT m.*, u.name as sender_name 
+       FROM messages m 
+       JOIN users u ON m.sender_id = u.id 
+       WHERE m.id = $1`,
+      [messageId]
+    );
+    
+    // Delete the message completely from database
+    await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
+    
+    // Also remove from deleted_messages table
+    await pool.query('DELETE FROM deleted_messages WHERE message_id = $1', [messageId]);
+    
+    console.log(`✅ Message ${messageId} deleted for everyone`);
+    
+    // Notify all involved users via socket
+    const message = messageDetails.rows[0];
+    if (message) {
+      io.to(message.sender_id.toString()).emit('message_deleted', messageId);
+      io.to(message.receiver_id.toString()).emit('message_deleted', messageId);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Message deleted for everyone'
+    });
+    
+  } catch (error) {
+    console.error('❌ Delete for everyone error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete message'
     });
   }
 });
@@ -294,6 +408,40 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('❌ Message save error:', error);
       socket.emit('message_error', { error: 'Failed to save message to database' });
+    }
+  });
+
+  // Handle delete message events
+  socket.on('delete_message', async (data) => {
+    try {
+      const { messageId, userId, deleteType } = data;
+      
+      if (deleteType === 'for_me') {
+        // Mark as deleted for this user only
+        await pool.query(
+          'INSERT INTO deleted_messages (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [messageId, userId]
+        );
+        socket.emit('message_deleted', messageId);
+      } else if (deleteType === 'for_everyone') {
+        // Delete completely and notify both users
+        const message = await pool.query(
+          'SELECT * FROM messages WHERE id = $1 AND sender_id = $2',
+          [messageId, userId]
+        );
+        
+        if (message.rows.length > 0) {
+          await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
+          await pool.query('DELETE FROM deleted_messages WHERE message_id = $1', [messageId]);
+          
+          // Notify both users
+          io.to(message.rows[0].sender_id.toString()).emit('message_deleted', messageId);
+          io.to(message.rows[0].receiver_id.toString()).emit('message_deleted', messageId);
+        }
+      }
+    } catch (error) {
+      console.error('❌ Delete message socket error:', error);
+      socket.emit('delete_error', { error: 'Failed to delete message' });
     }
   });
 
