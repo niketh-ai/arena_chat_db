@@ -23,25 +23,28 @@ app.use(cors());
 app.use(express.json());
 
 // ========== FILE UPLOAD SETUP ==========
+// Create uploads directory if it doesn't exist
 const uploadsDir = './uploads';
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log('✅ Created uploads directory');
 }
 
+// Configure multer for file storage
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, 'uploads/');
     },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+        cb(null, 'file-' + uniqueSuffix + path.extname(file.originalname));
     }
 });
 
 const upload = multer({ 
     storage: storage,
     limits: {
-        fileSize: 50 * 1024 * 1024
+        fileSize: 50 * 1024 * 1024 // 50MB limit
     }
 });
 
@@ -56,9 +59,19 @@ const pool = new Pool({
     }
 });
 
+// Test database connection
+pool.on('connect', () => {
+    console.log('✅ Connected to PostgreSQL database');
+});
+
+pool.on('error', (err) => {
+    console.error('❌ Database connection error:', err);
+});
+
 // Initialize database tables
 async function initializeDatabase() {
     try {
+        // Users table
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -69,6 +82,7 @@ async function initializeDatabase() {
             )
         `);
 
+        // Messages table with media support
         await pool.query(`
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -84,6 +98,7 @@ async function initializeDatabase() {
             )
         `);
 
+        // Create deleted_messages table
         await pool.query(`
             CREATE TABLE IF NOT EXISTS deleted_messages (
                 id SERIAL PRIMARY KEY,
@@ -106,11 +121,20 @@ async function initializeDatabase() {
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Arena Chat Server is running!',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        endpoints: [
+            'POST /api/upload - File upload',
+            'POST /api/register - User registration',
+            'POST /api/login - User login',
+            'GET /api/users - Get all users',
+            'GET /api/messages/:user1Id/:user2Id - Get messages',
+            'DELETE /api/messages/delete-for-me - Delete message for me',
+            'DELETE /api/messages/delete-for-everyone - Delete message for everyone'
+        ]
     });
 });
 
-// FILE UPLOAD ENDPOINT - FIXED
+// FILE UPLOAD ENDPOINT - FIXED POST METHOD
 app.post('/api/upload', upload.single('file'), (req, res) => {
     try {
         console.log('📁 Upload request received');
@@ -123,7 +147,12 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             });
         }
 
-        console.log('✅ File received:', req.file.originalname);
+        console.log('✅ File received:', {
+            originalname: req.file.originalname,
+            filename: req.file.filename,
+            size: req.file.size,
+            mimetype: req.file.mimetype
+        });
         
         // Use your actual Render URL
         const fileUrl = `https://arena-chat-db.onrender.com/uploads/${req.file.filename}`;
@@ -135,7 +164,8 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             message: 'File uploaded successfully',
             fileUrl: fileUrl,
             fileName: req.file.originalname,
-            fileSize: req.file.size
+            fileSize: req.file.size,
+            fileType: req.file.mimetype
         });
         
     } catch (error) {
@@ -145,6 +175,14 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             message: 'Upload failed: ' + error.message 
         });
     }
+});
+
+// Test upload endpoint with GET (for debugging)
+app.get('/api/upload', (req, res) => {
+    res.json({ 
+        message: 'Use POST method to upload files',
+        example: 'curl -X POST -F "file=@yourfile.jpg" https://arena-chat-db.onrender.com/api/upload'
+    });
 });
 
 // User Registration
@@ -483,6 +521,7 @@ initializeDatabase().then(() => {
         console.log(`📧 API available at https://arena-chat-db.onrender.com/api`);
         console.log(`🔌 WebSocket available at https://arena-chat-db.onrender.com`);
         console.log('📁 File upload system: ACTIVE');
+        console.log('📤 Upload endpoint: POST https://arena-chat-db.onrender.com/api/upload');
     });
 }).catch(error => {
     console.error('❌ Failed to start server:', error);
