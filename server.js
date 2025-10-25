@@ -4,6 +4,9 @@ const socketIo = require('socket.io');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -19,7 +22,29 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL connection - DIRECT CONFIG (no database.js needed)
+// Configure multer for file storage
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = 'uploads/';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB limit
+  }
+});
+
+// PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -27,58 +52,9 @@ const pool = new Pool({
   }
 });
 
-// Test database connection
-pool.on('connect', () => {
-  console.log('✅ Connected to PostgreSQL database');
-});
+// Serve uploaded files statically
+app.use('/uploads', express.static('uploads'));
 
-pool.on('error', (err) => {
-  console.error('❌ Database connection error:', err);
-});
-
-// Handle typing indicators
-socket.on('user_typing', (data) => {
-    const { userId, isTyping, chatWithUserId } = data;
-    console.log(`⌨️ User ${userId} is ${isTyping ? 'typing' : 'not typing'} to ${chatWithUserId}`);
-    
-    // Notify the other user
-    io.to(chatWithUserId.toString()).emit('user_typing', {
-        userId: userId,
-        isTyping: isTyping,
-        chatWithUserId: chatWithUserId
-    });
-});
-
-// Handle online status
-socket.on('user_online', (data) => {
-    const { userId, isOnline } = data;
-    console.log(`🔵 User ${userId} is ${isOnline ? 'online' : 'offline'}`);
-    
-    // Broadcast to all connected users (you might want to limit this to friends only)
-    io.emit('user_online', {
-        userId: userId,
-        isOnline: isOnline,
-        lastSeen: new Date().toLocaleTimeString()
-    });
-});
-
-// Handle message status updates (delivered/read)
-socket.on('message_status_update', (data) => {
-    const { messageId, status, userId } = data;
-    console.log(`📨 Message ${messageId} status updated to ${status} by user ${userId}`);
-    
-    // Update message status in database
-    pool.query(
-        'UPDATE messages SET status = $1 WHERE id = $2',
-        [status, messageId]
-    );
-    
-    // Notify the sender about the status update
-    io.to(userId.toString()).emit('message_status_update', {
-        messageId: messageId,
-        status: status
-    });
-});
 // Initialize database tables
 async function initializeDatabase() {
   try {
@@ -93,18 +69,23 @@ async function initializeDatabase() {
       )
     `);
 
-    // Messages table - FIXED WITH PROPER COLUMNS
+    // Messages table with media support
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
         sender_id INTEGER NOT NULL REFERENCES users(id),
         receiver_id INTEGER NOT NULL REFERENCES users(id),
         message_text TEXT NOT NULL,
+        message_type VARCHAR(20) DEFAULT 'text',
+        media_url TEXT,
+        file_size VARCHAR(50),
+        duration VARCHAR(20),
+        status VARCHAR(20) DEFAULT 'sent',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Create deleted_messages table for "delete for me" functionality
+    // Create deleted_messages table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS deleted_messages (
         id SERIAL PRIMARY KEY,
@@ -131,6 +112,28 @@ app.get('/', (req, res) => {
   });
 });
 
+// File upload endpoint
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    const fileUrl = `https://${req.get('host')}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      message: 'File uploaded successfully',
+      fileUrl: fileUrl,
+      fileName: req.file.originalname,
+      fileSize: req.file.size
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ success: false, message: 'Upload failed' });
+  }
+});
+
 // User Registration
 app.post('/api/register', async (req, res) => {
   try {
@@ -143,10 +146,8 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Insert user
     const result = await pool.query(
       'INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id, name, email',
       [email, hashedPassword, name]
@@ -159,7 +160,7 @@ app.post('/api/register', async (req, res) => {
     });
     
   } catch (error) {
-    if (error.code === '23505') { // Unique violation
+    if (error.code === '23505') {
       res.status(400).json({ 
         success: false, 
         message: 'Email already exists' 
@@ -186,7 +187,6 @@ app.post('/api/login', async (req, res) => {
       });
     }
 
-    // Find user
     const result = await pool.query(
       'SELECT * FROM users WHERE email = $1',
       [email]
@@ -200,8 +200,6 @@ app.post('/api/login', async (req, res) => {
     }
     
     const user = result.rows[0];
-    
-    // Check password
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     
     if (!isPasswordValid) {
@@ -229,7 +227,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Get all users (for friend search)
+// Get all users
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(
@@ -249,16 +247,16 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// Get messages between two users - UPDATED to exclude deleted messages
+// Get messages between two users
 app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
   try {
     const { user1Id, user2Id } = req.params;
     
-    console.log(`📨 Loading messages between ${user1Id} and ${user2Id}`);
-    
     const result = await pool.query(
       `SELECT m.id, m.sender_id as "senderId", m.receiver_id as "receiverId", 
               m.message_text as "messageText", u.name as "senderName", 
+              m.message_type as "messageType", m.media_url as "mediaUrl",
+              m.file_size as "fileSize", m.duration, m.status,
               m.created_at as timestamp
        FROM messages m 
        JOIN users u ON m.sender_id = u.id 
@@ -270,8 +268,6 @@ app.get('/api/messages/:user1Id/:user2Id', async (req, res) => {
        ORDER BY m.created_at ASC`,
       [user1Id, user2Id]
     );
-    
-    console.log(`✅ Found ${result.rows.length} messages in database`);
     
     res.json({ 
       success: true,
@@ -291,9 +287,6 @@ app.delete('/api/messages/delete-for-me', async (req, res) => {
   try {
     const { messageId, userId } = req.body;
     
-    console.log(`🗑️ Delete for me: Message ${messageId} by User ${userId}`);
-    
-    // Check if message exists and user has permission to delete it
     const messageCheck = await pool.query(
       'SELECT * FROM messages WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)',
       [messageId, userId]
@@ -306,13 +299,10 @@ app.delete('/api/messages/delete-for-me', async (req, res) => {
       });
     }
     
-    // Mark message as deleted for this user
     await pool.query(
       'INSERT INTO deleted_messages (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       [messageId, userId]
     );
-    
-    console.log(`✅ Message ${messageId} deleted for user ${userId}`);
     
     res.json({
       success: true,
@@ -333,9 +323,6 @@ app.delete('/api/messages/delete-for-everyone', async (req, res) => {
   try {
     const { messageId, userId } = req.body;
     
-    console.log(`🗑️ Delete for everyone: Message ${messageId} by User ${userId}`);
-    
-    // Check if user is the sender of the message
     const messageCheck = await pool.query(
       'SELECT * FROM messages WHERE id = $1 AND sender_id = $2',
       [messageId, userId]
@@ -348,7 +335,6 @@ app.delete('/api/messages/delete-for-everyone', async (req, res) => {
       });
     }
     
-    // Get message details for socket notification
     const messageDetails = await pool.query(
       `SELECT m.*, u.name as sender_name 
        FROM messages m 
@@ -357,15 +343,9 @@ app.delete('/api/messages/delete-for-everyone', async (req, res) => {
       [messageId]
     );
     
-    // Delete the message completely from database
     await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
-    
-    // Also remove from deleted_messages table
     await pool.query('DELETE FROM deleted_messages WHERE message_id = $1', [messageId]);
     
-    console.log(`✅ Message ${messageId} deleted for everyone`);
-    
-    // Notify all involved users via socket
     const message = messageDetails.rows[0];
     if (message) {
       io.to(message.sender_id.toString()).emit('message_deleted', messageId);
@@ -386,42 +366,36 @@ app.delete('/api/messages/delete-for-everyone', async (req, res) => {
   }
 });
 
-// ========== REAL-TIME MESSAGING WITH NOTIFICATIONS ==========
+// ========== SOCKET.IO ==========
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Join user's personal room
   socket.on('join_user', (userId) => {
     socket.join(userId.toString());
     console.log(`👤 User ${userId} joined room`);
   });
 
-  // Handle sending messages - UPDATED WITH NOTIFICATIONS
+  // Handle sending messages with media support
   socket.on('send_message', async (data) => {
     try {
-      const { senderId, receiverId, messageText } = data;
+      const { senderId, receiverId, messageText, messageType = 'text', mediaUrl, fileSize, duration } = data;
       
-      console.log('💬 Message received for saving:', { senderId, receiverId, messageText });
+      console.log('💬 Message received:', { senderId, receiverId, messageType });
 
-      // Validate data
       if (!senderId || !receiverId || !messageText) {
-        console.error('❌ Missing required fields');
         socket.emit('message_error', { error: 'Missing required fields' });
         return;
       }
 
-      console.log('💾 Attempting to save message to database...');
-      
-      // Save message to database - WITH PROPER ERROR HANDLING
       const result = await pool.query(
-        'INSERT INTO messages (sender_id, receiver_id, message_text) VALUES ($1, $2, $3) RETURNING id, created_at',
-        [senderId, receiverId, messageText]
+        `INSERT INTO messages (sender_id, receiver_id, message_text, message_type, media_url, file_size, duration) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) 
+         RETURNING id, created_at`,
+        [senderId, receiverId, messageText, messageType, mediaUrl, fileSize, duration]
       );
 
       const savedMessage = result.rows[0];
-      console.log('✅ Message saved to database with ID:', savedMessage.id);
       
-      // Get sender name
       const userResult = await pool.query(
         'SELECT name FROM users WHERE id = $1',
         [senderId]
@@ -435,80 +409,55 @@ io.on('connection', (socket) => {
         receiverId: parseInt(receiverId),
         messageText: messageText,
         senderName: senderName,
-        timestamp: savedMessage.created_at
+        timestamp: savedMessage.created_at,
+        messageType: messageType,
+        mediaUrl: mediaUrl,
+        fileSize: fileSize,
+        duration: duration,
+        status: 'sent'
       };
-
-      console.log('📨 Broadcasting message:', messageData);
 
       // Send to receiver
       io.to(receiverId.toString()).emit('new_message', messageData);
-      
-      // Also send back to sender (for confirmation)
+      // Send back to sender
       io.to(senderId.toString()).emit('new_message', messageData);
       
-      // Send notification to receiver
-      const notificationData = {
-        senderId: parseInt(senderId),
-        senderName: senderName,
-        messageText: messageText,
-        messageId: savedMessage.id,
-        timestamp: savedMessage.created_at
-      };
-      
-      io.to(receiverId.toString()).emit('new_notification', notificationData);
-      console.log('🔔 Notification sent to user:', receiverId);
-      
-      console.log('✅ Message delivered to both users with notification');
+      console.log('✅ Message delivered to both users');
 
     } catch (error) {
       console.error('❌ Message save error:', error);
-      socket.emit('message_error', { error: 'Failed to save message to database' });
+      socket.emit('message_error', { error: 'Failed to save message' });
     }
   });
 
-  // Handle delete message events
-  socket.on('delete_message', async (data) => {
-    try {
-      const { messageId, userId, deleteType } = data;
-      
-      if (deleteType === 'for_me') {
-        // Mark as deleted for this user only
-        await pool.query(
-          'INSERT INTO deleted_messages (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [messageId, userId]
-        );
-        socket.emit('message_deleted', messageId);
-      } else if (deleteType === 'for_everyone') {
-        // Delete completely and notify both users
-        const message = await pool.query(
-          'SELECT * FROM messages WHERE id = $1 AND sender_id = $2',
-          [messageId, userId]
-        );
-        
-        if (message.rows.length > 0) {
-          await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
-          await pool.query('DELETE FROM deleted_messages WHERE message_id = $1', [messageId]);
-          
-          // Notify both users
-          io.to(message.rows[0].sender_id.toString()).emit('message_deleted', messageId);
-          io.to(message.rows[0].receiver_id.toString()).emit('message_deleted', messageId);
-        }
-      }
-    } catch (error) {
-      console.error('❌ Delete message socket error:', error);
-      socket.emit('delete_error', { error: 'Failed to delete message' });
-    }
+  socket.on('user_typing', (data) => {
+    const { userId, isTyping, chatWithUserId } = data;
+    io.to(chatWithUserId.toString()).emit('user_typing', {
+        userId: userId,
+        isTyping: isTyping,
+        chatWithUserId: chatWithUserId
+    });
   });
 
-  // Handle notification read events
-  socket.on('mark_notification_read', (data) => {
-    try {
-      const { userId, senderId } = data;
-      console.log(`📱 User ${userId} marked notifications from ${senderId} as read`);
-      // You can implement server-side notification tracking here if needed
-    } catch (error) {
-      console.error('❌ Notification read error:', error);
-    }
+  socket.on('user_online', (data) => {
+    const { userId, isOnline } = data;
+    io.emit('user_online', {
+        userId: userId,
+        isOnline: isOnline,
+        lastSeen: new Date().toLocaleTimeString()
+    });
+  });
+
+  socket.on('message_status_update', (data) => {
+    const { messageId, status, userId } = data;
+    pool.query(
+        'UPDATE messages SET status = $1 WHERE id = $2',
+        [status, messageId]
+    );
+    io.to(userId.toString()).emit('message_status_update', {
+        messageId: messageId,
+        status: status
+    });
   });
 
   socket.on('disconnect', () => {
@@ -521,9 +470,9 @@ initializeDatabase().then(() => {
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📧 API available at http://localhost:${PORT}/api`);
-    console.log(`🔌 WebSocket available at http://localhost:${PORT}`);
-    console.log('🔔 Notification system: ACTIVE');
+    console.log(`📧 API available at https://arena-chat-db.onrender.com/api`);
+    console.log(`🔌 WebSocket available at https://arena-chat-db.onrender.com`);
+    console.log('📁 File upload system: ACTIVE');
   });
 }).catch(error => {
   console.error('❌ Failed to start server:', error);
