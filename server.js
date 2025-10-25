@@ -36,6 +36,49 @@ pool.on('error', (err) => {
   console.error('❌ Database connection error:', err);
 });
 
+// Handle typing indicators
+socket.on('user_typing', (data) => {
+    const { userId, isTyping, chatWithUserId } = data;
+    console.log(`⌨️ User ${userId} is ${isTyping ? 'typing' : 'not typing'} to ${chatWithUserId}`);
+    
+    // Notify the other user
+    io.to(chatWithUserId.toString()).emit('user_typing', {
+        userId: userId,
+        isTyping: isTyping,
+        chatWithUserId: chatWithUserId
+    });
+});
+
+// Handle online status
+socket.on('user_online', (data) => {
+    const { userId, isOnline } = data;
+    console.log(`🔵 User ${userId} is ${isOnline ? 'online' : 'offline'}`);
+    
+    // Broadcast to all connected users (you might want to limit this to friends only)
+    io.emit('user_online', {
+        userId: userId,
+        isOnline: isOnline,
+        lastSeen: new Date().toLocaleTimeString()
+    });
+});
+
+// Handle message status updates (delivered/read)
+socket.on('message_status_update', (data) => {
+    const { messageId, status, userId } = data;
+    console.log(`📨 Message ${messageId} status updated to ${status} by user ${userId}`);
+    
+    // Update message status in database
+    pool.query(
+        'UPDATE messages SET status = $1 WHERE id = $2',
+        [status, messageId]
+    );
+    
+    // Notify the sender about the status update
+    io.to(userId.toString()).emit('message_status_update', {
+        messageId: messageId,
+        status: status
+    });
+});
 // Initialize database tables
 async function initializeDatabase() {
   try {
