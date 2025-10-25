@@ -59,15 +59,6 @@ const pool = new Pool({
     }
 });
 
-// Test database connection
-pool.on('connect', () => {
-    console.log('✅ Connected to PostgreSQL database');
-});
-
-pool.on('error', (err) => {
-    console.error('❌ Database connection error:', err);
-});
-
 // Initialize database tables
 async function initializeDatabase() {
     try {
@@ -134,7 +125,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// FILE UPLOAD ENDPOINT - FIXED POST METHOD
+// FILE UPLOAD ENDPOINT
 app.post('/api/upload', upload.single('file'), (req, res) => {
     try {
         console.log('📁 Upload request received');
@@ -154,7 +145,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             mimetype: req.file.mimetype
         });
         
-        // Use your actual Render URL
+        // Generate file URL
         const fileUrl = `https://arena-chat-db.onrender.com/uploads/${req.file.filename}`;
         
         console.log('📤 File URL generated:', fileUrl);
@@ -175,14 +166,6 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             message: 'Upload failed: ' + error.message 
         });
     }
-});
-
-// Test upload endpoint with GET (for debugging)
-app.get('/api/upload', (req, res) => {
-    res.json({ 
-        message: 'Use POST method to upload files',
-        example: 'curl -X POST -F "file=@yourfile.jpg" https://arena-chat-db.onrender.com/api/upload'
-    });
 });
 
 // User Registration
